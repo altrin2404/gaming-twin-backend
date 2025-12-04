@@ -1,149 +1,169 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import psycopg2
-import json
 from typing import Optional
 from datetime import datetime, time
+import os
+import psycopg2
+import json
 
 app = FastAPI(title="Gaming Twin Backend")
 
-# ---------- MODELS ----------
+# ---------- Models ----------
 
 class GamingEvent(BaseModel):
     user_id: str
     game_name: str
-    duration: int  # minutes
-
+    duration: int   # minutes
 
 class ThresholdUpdate(BaseModel):
     daily: Optional[int] = None
     night: Optional[int] = None
 
-
-# ---------- DB CONNECTION ----------
+# ---------- Database connection using env var ----------
 
 def get_db_connection():
-    """Connect to PostgreSQL gaming_twin_db."""
-    return psycopg2.connect(
-        host="localhost",
-        database="gaming_twin_db",
-        user="postgres",
-        password="2404"
+    db_url = os.getenv("DATABASE_URL")
+    if not db_url:
+        raise RuntimeError("DATABASE_URL not set")
+    return psycopg2.connect(db_url)
+
+# ---------- Helper functions ----------
+
+def is_night(now: datetime) -> bool:
+    start = time(22, 0)
+    end = time(6, 0)
+    t = now.time()
+    return t >= start or t < end
+
+def update_aggregates(conn, user_id: str, duration: int, event_time: datetime):
+    cur = conn.cursor()
+
+    # ensure twin row exists
+    cur.execute(
+        """
+        INSERT INTO digital_twins (user_id, thresholds, aggregates, state, created_at, last_updated)
+        VALUES (%s, '{"daily":120,"night":60}', '{"today_minutes":0,"weekly_minutes":0,"night_minutes":0,"sessions_per_day":0}', 'Healthy', NOW(), NOW())
+        ON CONFLICT (user_id) DO NOTHING
+        """,
+        (user_id,)
     )
 
+    # today / week boundaries
+    today = event_time.date()
+    week_start = today.fromordinal(today.toordinal() - 6)
 
-# ---------- ROUTES ----------
+    # recompute aggregates from events
+    cur.execute(
+        """
+        SELECT duration, event_time
+        FROM events
+        WHERE user_id = %s
+        AND event_time::date BETWEEN %s AND %s
+        """,
+        (user_id, week_start, today)
+    )
+    rows = cur.fetchall()
+
+    today_minutes = 0
+    weekly_minutes = 0
+    night_minutes = 0
+    sessions_per_day = 0
+    day_sessions = {}
+
+    for dur, ts in rows:
+        d = ts.date()
+        weekly_minutes += dur
+        if d == today:
+            today_minutes += dur
+            day_sessions[d] = day_sessions.get(d, 0) + 1
+        if is_night(ts):
+            night_minutes += dur
+
+    sessions_per_day = day_sessions.get(today, 0)
+
+    aggregates = {
+        "today_minutes": today_minutes,
+        "weekly_minutes": weekly_minutes,
+        "night_minutes": night_minutes,
+        "sessions_per_day": sessions_per_day,
+    }
+
+    # get thresholds
+    cur.execute(
+        "SELECT thresholds FROM digital_twins WHERE user_id = %s",
+        (user_id,)
+    )
+    row = cur.fetchone()
+    if row and row[0]:
+        thresholds = row[0]
+    else:
+        thresholds = {"daily": 120, "night": 60}
+
+    # compute state
+    daily_th = thresholds.get("daily", 120)
+    if today_minutes <= daily_th * 0.5:
+        state = "Healthy"
+    elif today_minutes <= daily_th:
+        state = "Moderate"
+    else:
+        state = "Excessive"
+
+    cur.execute(
+        """
+        UPDATE digital_twins
+        SET aggregates = %s,
+            thresholds = %s,
+            state = %s,
+            last_updated = NOW()
+        WHERE user_id = %s
+        """,
+        (json.dumps(aggregates), json.dumps(thresholds), state, user_id)
+    )
+
+    conn.commit()
+    cur.close()
+
+# ---------- Endpoints ----------
 
 @app.get("/health")
-async def health():
-    """Check API + DB status."""
+def health():
     try:
         conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute("SELECT 1")
+        cur.fetchone()
+        cur.close()
         conn.close()
-        return {"status": "healthy", "database": "gaming_twin_db connected"}
+        return {"status": "ok"}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-
 @app.post("/events")
-async def ingest_event(event: GamingEvent):
-    """
-    1) Store raw event in events table
-    2) Ensure digital twin row exists
-    3) Update aggregates: today_minutes, weekly_minutes, night_minutes
-    4) Update state (Healthy / Moderate / Excessive)
-    """
+def ingest_event(event: GamingEvent):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # 1) Insert raw event
+        now = datetime.utcnow()
         cur.execute(
             """
-            INSERT INTO events (user_id, game_name, duration)
-            VALUES (%s, %s, %s)
+            INSERT INTO events (user_id, game_name, duration, event_time)
+            VALUES (%s, %s, %s, %s)
             """,
-            (event.user_id, event.game_name, event.duration)
+            (event.user_id, event.game_name, event.duration, now)
         )
 
-        # 2) Make sure a twin row exists
-        cur.execute(
-            """
-            INSERT INTO digital_twins (user_id)
-            VALUES (%s)
-            ON CONFLICT (user_id) DO NOTHING
-            """,
-            (event.user_id,)
-        )
-
-        # 3) Read current aggregates
-        cur.execute(
-            "SELECT aggregates FROM digital_twins WHERE user_id = %s",
-            (event.user_id,)
-        )
-        row = cur.fetchone()
-        aggregates: Optional[dict] = row[0] if row and row[0] is not None else None
-
-        if not aggregates:
-            aggregates = {
-                "today_minutes": 0,
-                "weekly_minutes": 0,
-                "night_minutes": 0
-            }
-
-        # 4a) Update today_minutes
-        new_today = int(aggregates.get("today_minutes", 0)) + int(event.duration)
-        aggregates["today_minutes"] = new_today
-
-        # 4b) Update weekly_minutes (simple cumulative)
-        new_weekly = int(aggregates.get("weekly_minutes", 0)) + int(event.duration)
-        aggregates["weekly_minutes"] = new_weekly
-
-        # 4c) Update night_minutes if in night window (22:00–06:00)
-        now = datetime.now().time()
-        if now >= time(22, 0) or now <= time(6, 0):
-            new_night = int(aggregates.get("night_minutes", 0)) + int(event.duration)
-            aggregates["night_minutes"] = new_night
-
-        # 5) Decide new state based on today_minutes
-        if new_today > 120:
-            new_state = "Excessive"
-        elif new_today > 60:
-            new_state = "Moderate"
-        else:
-            new_state = "Healthy"
-
-        # 6) Write back aggregates AND state
-        cur.execute(
-            """
-            UPDATE digital_twins
-            SET aggregates = %s,
-                state = %s,
-                updated_at = NOW()
-            WHERE user_id = %s
-            """,
-            (json.dumps(aggregates), new_state, event.user_id)
-        )
+        update_aggregates(conn, event.user_id, event.duration, now)
 
         conn.commit()
         cur.close()
         conn.close()
-
-        return {
-            "status": "processed",
-            "user_id": event.user_id,
-            "game": event.game_name,
-            "today_minutes": new_today,
-            "weekly_minutes": new_weekly,
-            "state": new_state
-        }
+        return {"status": "processed", "user_id": event.user_id}
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-
 @app.get("/digital-twin/{user_id}")
-async def get_twin(user_id: str):
-    """Return the digital twin row for a user."""
+def get_twin(user_id: str):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
@@ -155,35 +175,32 @@ async def get_twin(user_id: str):
             """,
             (user_id,)
         )
-        result = cur.fetchone()
+        row = cur.fetchone()
         cur.close()
         conn.close()
 
-        if result:
-            return {
-                "user_id": result[0],
-                "thresholds": result[1],
-                "aggregates": result[2],
-                "state": result[3]
-            }
-        return {"error": "User not found"}
+        if not row:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        return {
+            "user_id": row[0],
+            "thresholds": row[1],
+            "aggregates": row[2],
+            "state": row[3],
+        }
+    except HTTPException:
+        raise
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-
 @app.get("/reports/{user_id}")
-async def get_report(user_id: str):
-    """
-    Simple report for dashboard:
-    - today_minutes, weekly_minutes, night_minutes
-    - state and thresholds
-    """
+def get_reports(user_id: str):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT thresholds, aggregates, state
+            SELECT aggregates
             FROM digital_twins
             WHERE user_id = %s
             """,
@@ -194,51 +211,37 @@ async def get_report(user_id: str):
         conn.close()
 
         if not row:
-            return {"error": "User not found"}
+            raise HTTPException(status_code=404, detail="User not found")
 
-        thresholds = row[0] or {}
-        aggregates = row[1] or {}
-        state = row[2]
-
+        aggregates = row[0] or {}
         return {
             "user_id": user_id,
             "today_minutes": aggregates.get("today_minutes", 0),
             "weekly_minutes": aggregates.get("weekly_minutes", 0),
             "night_minutes": aggregates.get("night_minutes", 0),
-            "state": state,
-            "daily_threshold": thresholds.get("daily", 120),
-            "night_threshold": thresholds.get("night", 60)
+            "sessions_per_day": aggregates.get("sessions_per_day", 0),
         }
+    except HTTPException:
+        raise
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-
 @app.post("/digital-twin/{user_id}/threshold")
-async def update_threshold(user_id: str, body: ThresholdUpdate):
-    """Update daily/night thresholds for a user's twin (for parent settings)."""
+def update_threshold(user_id: str, body: ThresholdUpdate):
     try:
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # get existing thresholds
+        # existing thresholds
         cur.execute(
             "SELECT thresholds FROM digital_twins WHERE user_id = %s",
             (user_id,)
         )
         row = cur.fetchone()
-        if not row:
-            # create twin if not exists
-            cur.execute(
-                """
-                INSERT INTO digital_twins (user_id)
-                VALUES (%s)
-                ON CONFLICT (user_id) DO NOTHING
-                """,
-                (user_id,)
-            )
-            thresholds = {"daily": 120, "night": 60}
+        if row and row[0]:
+            thresholds = row[0]
         else:
-            thresholds = row[0] or {"daily": 120, "night": 60}
+            thresholds = {"daily": 120, "night": 60}
 
         if body.daily is not None:
             thresholds["daily"] = body.daily
@@ -248,7 +251,8 @@ async def update_threshold(user_id: str, body: ThresholdUpdate):
         cur.execute(
             """
             UPDATE digital_twins
-            SET thresholds = %s, updated_at = NOW()
+            SET thresholds = %s,
+                last_updated = NOW()
             WHERE user_id = %s
             """,
             (json.dumps(thresholds), user_id)
