@@ -9,10 +9,8 @@ import json
 app = FastAPI(title="Gaming Twin Backend")
 
 # ---------- API key middleware ----------
-
 @app.middleware("http")
 async def api_key_auth(request: Request, call_next):
-    # allow unauthenticated access only for root and health
     if request.url.path in ["/", "/health"]:
         return await call_next(request)
 
@@ -24,18 +22,17 @@ async def api_key_auth(request: Request, call_next):
     return await call_next(request)
 
 # ---------- Models ----------
-
 class GamingEvent(BaseModel):
     user_id: str
+    childdeviceid: str  # NEW: Matches integration doc
     game_name: str
-    duration: int   # minutes
+    duration: int
 
 class ThresholdUpdate(BaseModel):
     daily: Optional[int] = None
     night: Optional[int] = None
 
-# ---------- Database connection using env var ----------
-
+# ---------- Database connection ----------
 def get_db_connection():
     db_url = os.getenv("DATABASE_URL")
     if not db_url:
@@ -43,7 +40,6 @@ def get_db_connection():
     return psycopg2.connect(db_url)
 
 # ---------- Helper functions ----------
-
 def is_night(now: datetime) -> bool:
     start = time(22, 0)
     end = time(6, 0)
@@ -53,23 +49,23 @@ def is_night(now: datetime) -> bool:
 def update_aggregates(conn, user_id: str, duration: int, event_time: datetime):
     cur = conn.cursor()
 
-    # ensure twin row exists
+    # Ensure twin row exists
     cur.execute(
         """
-        INSERT INTO digital_twins (user_id, thresholds, aggregates, state, created_at, last_updated)
+        INSERT INTO digital_twins (user_id, thresholds, aggregates, state, risk_level, alert_message, created_at, last_updated)
         VALUES (%s, '{"daily":120,"night":60}',
-                   '{"today_minutes":0,"weekly_minutes":0,"night_minutes":0,"sessions_per_day":0}',
-                   'Healthy', NOW(), NOW())
+                 '{"today_minutes":0,"weekly_minutes":0,"night_minutes":0,"sessions_per_day":0}',
+                 'Healthy', 'Unknown', '', NOW(), NOW())
         ON CONFLICT (user_id) DO NOTHING
         """,
         (user_id,)
     )
 
-    # today / week boundaries
+    # Today/week boundaries
     today = event_time.date()
     week_start = today.fromordinal(today.toordinal() - 6)
 
-    # recompute aggregates from events
+    # Recompute aggregates from events
     cur.execute(
         """
         SELECT duration, event_time
@@ -105,7 +101,7 @@ def update_aggregates(conn, user_id: str, duration: int, event_time: datetime):
         "sessions_per_day": sessions_per_day,
     }
 
-    # get thresholds
+    # Get thresholds
     cur.execute(
         "SELECT thresholds FROM digital_twins WHERE user_id = %s",
         (user_id,)
@@ -116,7 +112,7 @@ def update_aggregates(conn, user_id: str, duration: int, event_time: datetime):
     else:
         thresholds = {"daily": 120, "night": 60}
 
-    # compute state
+    # Compute state
     daily_th = thresholds.get("daily", 120)
     if today_minutes <= daily_th * 0.5:
         state = "Healthy"
@@ -125,23 +121,35 @@ def update_aggregates(conn, user_id: str, duration: int, event_time: datetime):
     else:
         state = "Excessive"
 
+    # NEW: Compute risk_level and alert_message for Member 3
+    risk_level = 'Unknown'
+    alert_message = ''
+    if today_minutes > daily_th:
+        risk_level = 'High'
+        alert_message = f"Daily gaming exceeded threshold ({today_minutes} > {daily_th} mins)"
+    elif night_minutes > thresholds.get("night", 60):
+        risk_level = 'Medium'
+        alert_message = f"Night gaming detected ({night_minutes} mins)"
+
+    # Update with NEW columns
     cur.execute(
         """
         UPDATE digital_twins
         SET aggregates = %s,
             thresholds = %s,
             state = %s,
+            risk_level = %s,
+            alert_message = %s,
             last_updated = NOW()
         WHERE user_id = %s
         """,
-        (json.dumps(aggregates), json.dumps(thresholds), state, user_id)
+        (json.dumps(aggregates), json.dumps(thresholds), state, risk_level, alert_message, user_id)
     )
 
     conn.commit()
     cur.close()
 
 # ---------- Endpoints ----------
-
 @app.get("/health")
 def health():
     try:
@@ -164,10 +172,10 @@ def ingest_event(event: GamingEvent):
         now = datetime.utcnow()
         cur.execute(
             """
-            INSERT INTO events (user_id, game_name, duration, event_time)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO events (user_id, childdeviceid, game_name, duration, event_time)
+            VALUES (%s, %s, %s, %s, %s)
             """,
-            (event.user_id, event.game_name, event.duration, now)
+            (event.user_id, event.childdeviceid, event.game_name, event.duration, now)
         )
 
         update_aggregates(conn, event.user_id, event.duration, now)
@@ -186,7 +194,7 @@ def get_twin(user_id: str):
         cur = conn.cursor()
         cur.execute(
             """
-            SELECT user_id, thresholds, aggregates, state
+            SELECT user_id, thresholds, aggregates, state, risk_level, alert_message
             FROM digital_twins
             WHERE user_id = %s
             """,
@@ -204,6 +212,8 @@ def get_twin(user_id: str):
             "thresholds": row[1],
             "aggregates": row[2],
             "state": row[3],
+            "risk_level": row[4],      # NEW
+            "alert_message": row[5]    # NEW
         }
     except HTTPException:
         raise
@@ -249,7 +259,6 @@ def update_threshold(user_id: str, body: ThresholdUpdate):
         conn = get_db_connection()
         cur = conn.cursor()
 
-        # existing thresholds
         cur.execute(
             "SELECT thresholds FROM digital_twins WHERE user_id = %s",
             (user_id,)
