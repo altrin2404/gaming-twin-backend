@@ -9,6 +9,10 @@ import requests  # for ML API call
 
 app = FastAPI(title="Gaming Twin Backend")
 
+# ML URL: default is local, can be overridden via env var ML_API_URL on Render
+ML_URL = os.getenv("ML_API_URL", "http://localhost:9100/analyze-ml")
+
+
 # ---------- API key middleware ----------
 @app.middleware("http")
 async def api_key_auth(request: Request, call_next):
@@ -150,7 +154,7 @@ def update_aggregates(conn, user_id: str, duration: int, event_time: datetime):
 
     try:
         ml_response = requests.post(
-            "http://localhost:9100/analyze-ml",  # Member 3 service URL (local)
+            ML_URL,
             json={"digital_twin": twin_json},
             timeout=3,
         ).json()
