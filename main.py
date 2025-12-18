@@ -74,6 +74,72 @@ def get_db_connection():
 
 
 # ---------- Helper functions ----------
+def init_db():
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS parents (
+        parent_id SERIAL PRIMARY KEY,
+        email TEXT UNIQUE,
+        password TEXT,
+        name TEXT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS children (
+        child_id TEXT PRIMARY KEY,
+        parent_id INTEGER REFERENCES parents(parent_id),
+        name TEXT,
+        age INTEGER
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS digital_twins (
+        user_id TEXT PRIMARY KEY,
+        thresholds JSONB,
+        aggregates JSONB,
+        state TEXT,
+        risk_level TEXT,
+        alert_message TEXT,
+        created_at TIMESTAMP,
+        last_updated TIMESTAMP
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS events (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT,
+        childdeviceid TEXT,
+        package_name TEXT,
+        game_name TEXT,
+        duration INTEGER,
+        event_time TIMESTAMP,
+        isnight BOOLEAN,
+        start_time_bigint BIGINT,
+        end_time_bigint BIGINT,
+        event_timestamp_bigint BIGINT
+    )
+    """)
+
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS alerts (
+        id SERIAL PRIMARY KEY,
+        user_id TEXT,
+        severity TEXT,
+        message TEXT,
+        created_at TIMESTAMP DEFAULT NOW()
+    )
+    """)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
 def is_night(now: datetime) -> bool:
     start = time(22, 0)
     end = time(6, 0)
@@ -509,4 +575,9 @@ def create_alert(user_id: str, body: AlertCreate):
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.on_event("startup")
+def startup_event():
+    init_db()
+
 
