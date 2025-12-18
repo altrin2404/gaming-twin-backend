@@ -6,8 +6,22 @@ import os
 import psycopg2
 import json
 import requests  # for ML API call
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI(title="Gaming Twin Backend")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",   # Vite dev
+        "http://localhost:3000",   # fallback
+        "https://gaming-twin-backend.onrender.com"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],  # IMPORTANT for X-API-KEY
+)
+
 
 # ML URL: default is local, can be overridden via env var ML_API_URL on Render
 ML_URL = os.getenv("ML_API_URL", "http://localhost:9100/analyze-ml")
@@ -16,8 +30,12 @@ ML_URL = os.getenv("ML_API_URL", "http://localhost:9100/analyze-ml")
 # ---------- API key middleware ----------
 @app.middleware("http")
 async def api_key_auth(request: Request, call_next):
-    # allow unauthenticated access only for root, health, and parent login
-    if request.url.path in ["/", "/health", "/parent/login"]:
+    # Allow preflight requests
+    if request.method == "OPTIONS":
+        return await call_next(request)
+
+    # Allow unauthenticated routes
+    if request.url.path in ["/", "/health", "/parent/login", "/auth/register"]:
         return await call_next(request)
 
     api_key_header = request.headers.get("X-API-KEY")
