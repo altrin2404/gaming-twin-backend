@@ -49,6 +49,21 @@ class ParentLoginRequest(BaseModel):
     username: str
     password: str
 
+class ParentRegisterRequest(BaseModel):
+    email: str
+    password: str
+    name: Optional[str] = ""
+    child_name: Optional[str] = ""
+    child_age: Optional[int] = None
+
+
+class ParentLoginRequest(BaseModel):
+    email: str
+    password: str
+
+class AlertCreate(BaseModel):
+    severity: str
+    message: str
 
 # ---------- Database connection ----------
 def get_db_connection():
@@ -367,11 +382,131 @@ def update_threshold(user_id: str, body: ThresholdUpdate):
 
 @app.post("/parent/login")
 def parent_login(body: ParentLoginRequest):
-    return {
-        "success": True,
-        "parent_id": "parent_001",
-        "token": "jwt_token_here",
-        "children": [
-            {"child_id": "child_101", "name": "John"}
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            SELECT p.parent_id, c.child_id, c.name
+            FROM parents p
+            JOIN children c ON c.parent_id = p.parent_id
+            WHERE p.email = %s AND p.password = %s
+            """,
+            (body.email, body.password)
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not rows:
+            raise HTTPException(status_code=401, detail="Invalid credentials")
+
+        children = [{"child_id": r[1], "name": r[2]} for r in rows]
+
+        return {
+            "success": True,
+            "parent_id": rows[0][0],
+            "token": "api-key-auth",  # frontend ignores this
+            "children": children
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/auth/register")
+def parent_register(body: ParentRegisterRequest):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+
+        # create parent
+        cur.execute(
+            """
+            INSERT INTO parents (email, password, name)
+            VALUES (%s, %s, %s)
+            RETURNING parent_id
+            """,
+            (body.email, body.password, body.name)
+        )
+        parent_id = cur.fetchone()[0]
+
+        # create child
+        child_id = f"child_{parent_id}"
+        cur.execute(
+            """
+            INSERT INTO children (child_id, parent_id, name, age)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (child_id, parent_id, body.child_name, body.child_age)
+        )
+
+        # seed digital twin
+        cur.execute(
+            """
+            INSERT INTO digital_twins
+            (user_id, thresholds, aggregates, state, risk_level, alert_message, created_at, last_updated)
+            VALUES (
+                %s,
+                '{"daily":120,"night":60}',
+                '{"today_minutes":0,"weekly_minutes":0,"night_minutes":0,"sessions_per_day":0}',
+                'Healthy','Unknown','',NOW(),NOW()
+            )
+            """,
+            (child_id,)
+        )
+
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return {"success": True, "parent_id": parent_id, "child_id": child_id}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.get("/alerts/{user_id}")
+def get_alerts(user_id: str):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT severity, message, created_at
+            FROM alerts
+            WHERE user_id = %s
+            ORDER BY created_at DESC
+            """,
+            (user_id,)
+        )
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        return [
+            {"severity": r[0], "message": r[1], "created_at": r[2]}
+            for r in rows
         ]
-    }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+        
+@app.post("/alerts/{user_id}")
+def create_alert(user_id: str, body: AlertCreate):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO alerts (user_id, severity, message)
+            VALUES (%s, %s, %s)
+            """,
+            (user_id, body.severity, body.message)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
