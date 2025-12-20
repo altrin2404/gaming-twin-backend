@@ -13,9 +13,11 @@ app = FastAPI(title="Gaming Twin Backend")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "https://localhost"
         "http://localhost:5173",   # Vite dev
         "http://localhost:3000",   # fallback
         "https://gaming-twin-backend.onrender.com"
+        
     ],
     allow_credentials=True,
     allow_methods=["*"],
