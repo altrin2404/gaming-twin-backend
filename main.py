@@ -13,7 +13,8 @@ app = FastAPI(title="Gaming Twin Backend")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://localhost"
+        "https://localhost",       # Capacitor / Android WebView
+        "http://localhost",        # safety
         "http://localhost:5173",   # Vite dev
         "http://localhost:3000",   # fallback
         "https://gaming-twin-backend.onrender.com"
@@ -63,11 +64,6 @@ class GamingEvent(BaseModel):
 class ThresholdUpdate(BaseModel):
     daily: Optional[int] = None
     night: Optional[int] = None
-
-
-class ParentLoginRequest(BaseModel):
-    username: str
-    password: str
 
 class ParentRegisterRequest(BaseModel):
     email: str
