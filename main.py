@@ -23,6 +23,7 @@ app.add_middleware(
         "http://localhost",
         "http://localhost:63596",   # Flutter web dev
         "http://localhost:3000",
+        "http://localhost:50823",
         "http://localhost:8080",
         "https://gaming-twin-backend.onrender.com",
     ],
