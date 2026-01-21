@@ -141,25 +141,39 @@ def shutdown():
 
 @app.middleware("http")
 async def api_key_auth(request: Request, call_next):
-    """API Key authentication middleware"""
-    # Allow these endpoints without API key
-    public_paths = ["/", "/health","/digital-twin", "/parent/login", "/debug/time", "/docs", "/openapi.json"]
-    
-    if request.url.path in public_paths:
+    # ✅ Allow preflight requests
+    if request.method == "OPTIONS":
         return await call_next(request)
-    
+
+    public_prefixes = (
+        "/",
+        "/health",
+        "/digital-twin",
+        "/parent/login",
+        "/debug",
+        "/docs",
+        "/openapi.json",
+    )
+
+    if request.url.path.startswith(public_prefixes):
+        return await call_next(request)
+
     api_key_header = request.headers.get("X-API-KEY")
     expected = os.getenv("API_KEY")
-    
+
     if not expected:
-        logger.warning("API_KEY environment variable not set - allowing request")
+        logger.warning("API_KEY not set — allowing request")
         return await call_next(request)
-    
+
     if api_key_header != expected:
-        logger.warning(f"Unauthorized access attempt to {request.url.path}")
-        return JSONResponse(status_code=401, content={"status": "error", "detail": "Unauthorized"})
-    
+        logger.warning(f"Unauthorized access to {request.url.path}")
+        return JSONResponse(
+            status_code=401,
+            content={"status": "error", "detail": "Unauthorized"}
+        )
+
     return await call_next(request)
+
 
 
 # ========== MODELS ==========
