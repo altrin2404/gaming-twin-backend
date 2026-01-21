@@ -19,8 +19,8 @@ app = FastAPI(title="Gaming Twin Backend")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "*"
-        "http://localhost"
+        "*",
+        "http://localhost",
         "http://localhost:63596",   # Flutter web dev
         "http://localhost:3000",
         "http://localhost:8080",
