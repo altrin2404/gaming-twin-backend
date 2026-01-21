@@ -143,7 +143,7 @@ def shutdown():
 async def api_key_auth(request: Request, call_next):
     """API Key authentication middleware"""
     # Allow these endpoints without API key
-    public_paths = ["/", "/health", "/parent/login", "/debug/time", "/docs", "/openapi.json"]
+    public_paths = ["/", "/health","/digital-twin", "/parent/login", "/debug/time", "/docs", "/openapi.json"]
     
     if request.url.path in public_paths:
         return await call_next(request)
