@@ -1,3 +1,4 @@
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -14,6 +15,21 @@ import logging
 # ========== SETUP ==========
 
 app = FastAPI(title="Gaming Twin Backend")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "*"
+        "http://localhost"
+        "http://localhost:63596",   # Flutter web dev
+        "http://localhost:3000",
+        "http://localhost:8080",
+        "https://gaming-twin-backend.onrender.com",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Logging
 logging.basicConfig(level=logging.INFO)
